@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'">
+<title>A.N.O.T.H.E.R. — Select Environment</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{width:700px;height:500px;overflow:hidden;font:13px/1.4 'Segoe UI',sans-serif;background:#0a1929}
+.w{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:28px}
+.n{font-size:30px;font-weight:700;color:#fff;letter-spacing:2px;margin-bottom:4px;text-align:center}
+.s{font-size:12px;color:rgba(255,255,255,.5);text-align:center}
+.t{display:flex;gap:20px}
+.c{width:170px;padding:24px 16px 18px;border-radius:14px;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:10px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);transition:border-color .2s,background .2s}
+.c:hover,.c:focus-visible{border-color:#4da6ff;background:rgba(255,255,255,.1);outline:none}
+.i{width:56px;height:56px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:24px}
+.g{background:#2d8a4e}.b{background:#1a6fb5}
+.l{font-size:14px;font-weight:700;color:#fff}
+.d{font-size:9px;padding:2px 8px;border-radius:8px;text-transform:uppercase;letter-spacing:.5px;font-weight:600;background:rgba(77,166,255,.2);color:#4da6ff}
+.p{font-size:10px;color:rgba(255,255,255,.3);text-align:center;line-height:1.5}
+</style>
+</head>
+<body>
+<div class="w">
+<div><div class="n">A.N.O.T.H.E.R.</div><div class="s">Private Client &mdash; Select Environment</div></div>
+<div class="t" role="group" aria-label="Environment selection">
+<button type="button" class="c" id="btn-dev" aria-label="Select Development environment"><div class="i g" aria-hidden="true">&#x1F4BB;</div><span class="l">Development</span><span class="d">&#x25CF; Active</span></button>
+<button type="button" class="c" id="btn-prod" aria-label="Select Production environment"><div class="i b" aria-hidden="true">&#x1F680;</div><span class="l">Production</span><span class="d">&#x25CF; Active</span></button>
+</div>
+<div class="p">&#x1F512; No tracking &middot; No history &middot; No telemetry<br>Sessions are ephemeral. External links open in your default browser.</div>
+</div>
+<script>
+document.getElementById('btn-dev').addEventListener('click', function() { anotherAPI.selectEnvironment('dev'); });
+document.getElementById('btn-prod').addEventListener('click', function() { anotherAPI.selectEnvironment('prod'); });
+</script>
+</body>
+</html>

@@ -1,0 +1,96 @@
+# QA Analysis — A.N.O.T.H.E.R. Private Client
+Fecha: 2026-09-25
+Stack: Electron 33 + Vanilla JS + AudioWorklet (noise reduction) + custom protocol anr://
+
+## Estado General
+Wrapper desktop privacy-focused con UI AeroNight, reducción de ruido por AudioWorklet
+en getUserMedia, protocolo custom anr:// para servir worklets, y hardening de performance.
+Madurez media (4 archivos JS). Enfoque claro en privacidad y audio processing.
+
+---
+
+## 🔴 Prioridad Alta
+
+### 1. Electron 33 desactualizado (SEGURIDAD)
+Electron 33 tiene vulnerabilidades conocidas. Actualizar a la última versión estable.
+Verificar compatibilidad con AudioWorklet y custom protocol registration tras update.
+
+### 2. Noise reduction state no persistente
+main.js:21 → noiseReductionEnabled se almacena solo en memoria. Se pierde al reiniciar.
+Persistir en electron-store o similar para mantener preferencia del usuario.
+
+### 3. AudioContext lifecycle management
+NOISE_INJECTION_SCRIPT crea/cierra AudioContext frecuentemente. El cleanup explícito
+es correcto, pero verificar:
+- Race conditions si getUserMedia se llama rápidamente
+- Memory leaks en entornos sin audio device
+- Error handling cuando AudioContext constructor throws
+
+### 4. Custom protocol security surface
+Protocolo anr:// registrado con privileges { standard, secure, supportFetchAPI }.
+Verificar que:
+- Solo sirva archivos AudioWorklet esperados
+- No exponga filesystem arbitrariamente
+- Valide paths contra whitelist de directorios
+
+---
+
+## 🟡 Prioridad Media
+
+### 5. Performance switches sin validación
+main.js:6-11 aplica múltiples commandLine switches. Algunos pueden causar issues:
+- disable-gpu-sandbox: reduce seguridad GPU
+- renderer-process-limit: muy bajo puede causar crashes con múltiples webviews
+- js-flags max-old-space-size: 512MB puede ser insuficiente para apps pesadas
+Documentar rationale de cada switch y permitir override vía config.
+
+### 6. Sin UI de configuración visible
+Noise reduction toggle probablemente existe en UI pero no hay evidencia de settings
+panel completo. Agregar:
+- Toggle noise reduction persistente
+- Audio device selection
+- Privacy settings (qué permisos permitir/bloquear)
+- About/version info
+
+### 7. selector-preload.js sin contexto
+Archivo existe pero no fue revisado en detalle. Verificar que:
+- No exponga APIs innecesarias al renderer
+- contextIsolation funcione correctamente
+- IPC messages estén validados
+
+### 8. Sin error reporting
+Si AudioWorklet falla silenciosamente, el usuario no sabe que noise reduction no está
+funcionando. Agregar logging visible o toast notification en fallos críticos.
+
+---
+
+## 🟢 Prioridad Baja
+
+### 9. Sin tests
+Agregar tests para:
+- Noise reduction state persistence
+- Protocol handler path validation
+- AudioContext lifecycle edge cases
+
+### 10. Sin CI/CD
+Configurar electron-builder smoke test en GitHub Actions.
+
+### 11. Licencia UNLICENSED
+package.json dice "UNLICENSED". Definir licencia antes de cualquier distribución
+o publicación.
+
+### 12. Sin auto-update
+Para app distribuida, implementar electron-updater o mecanismo de verificación
+de versión.
+
+---
+
+## Notas
+- El enfoque de privacy-first con hardening de performance es diferenciador.
+  Mantener esta filosofía en futuras features.
+- La inyección de script en getUserMedia es técnica avanzada pero frágil.
+  Monitorear cambios en Chromium/Electron que puedan romper este patrón.
+- El nombre "A.N.O.T.H.E.R." sugiere branding específico. Verificar que assets
+  y textos de UI sean consistentes con esta identidad.
+- allowScripts en package.json (electron-winstaller) indica build tooling legacy.
+  Evaluar migración a electron-builder estándar si causa problemas.

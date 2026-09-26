@@ -1,0 +1,35 @@
+{
+  "name": "another-private-client",
+  "version": "1.0.0",
+  "description": "A.N.O.T.H.E.R. Private Client - Privacy-focused desktop wrapper with AeroNight UI",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "build": "electron-builder --win dir"
+  },
+  "build": {
+    "appId": "com.another.private-client",
+    "productName": "ANOTHER-Client-v2",
+    "directories": {
+      "output": "Executables"
+    },
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": "dir"
+    }
+  },
+  "devDependencies": {
+    "electron": "^44.4.5",
+    "electron-builder": "^26.15.3"
+  },
+  "license": "UNLICENSED",
+  "private": true,
+  "allowScripts": {
+    "electron@33.4.11": true,
+    "electron-winstaller@5.4.0": true
+  }
+}

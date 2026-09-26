@@ -1,0 +1,83 @@
+A.N.O.T.H.E.R. PRIVATE CLIENT - CHANGELOG
+===========================================
+
+[0.6.0] — 2026-09-25
+
+ROBUSTEZ:
+- AudioWorklet module load failure ahora resetea moduleLoaded flag y retorna stream original sin procesar; anteriormente un fallo tras carga exitosa dejaba el flag en true, impidiendo reintentos.
+- Calibración de noise reduction ahora calcula frames dinámicamente según sampleRate y bufferSize reales (~1 segundo), eliminando dependencia de valores hardcoded (48kHz/128 samples).
+- Navegación inicial con retry exponencial (3 intentos) ante fallos transitorios de red; log de advertencia por intento y error permanente si todos fallan.
+- Toggle UI de noise reduction usa valor retornado por setNoiseReduction para actualizar estado visual, eliminando race condition entre lectura y escritura IPC.
+
+SEGURIDAD:
+- Validación explícita de clave de entorno en handler select-environment con log de advertencia [SECURITY] ante claves desconocidas antes del fallback a dev.
+- Cleanup de sesión ampliado: clearAuthCache() elimina credenciales HTTP cacheadas; service workers en ejecución se desregistran para prevenir retención de datos de sesión.
+
+MEJORAS:
+- processorOptions pasados a AudioWorkletNode con sampleRate y bufferSize del contexto activo para calibración precisa independientemente del hardware.
+
+[0.5.0] — 2026-09-25
+
+RENDIMIENTO:
+- trustedOrigins convertido a Set para búsqueda O(1) en permission handler, will-navigate y did-finish-load (antes Array.includes() era O(n)).
+
+ROBUSTEZ:
+- AudioContext creation ahora envuelto en try/catch dentro del script de inyección; si falla (sin dispositivo de audio, política bloqueada), se retorna el stream original sin procesar en lugar de crash silencioso.
+- Toggle UI de noise reduction ahora verifica window.anotherAPI antes de cada llamada IPC y protege acceso a elementos DOM con null checks, previniendo errores si el preload no cargó o el DOM mutó.
+- AudioContext.resume() protegido con try/catch adicional para manejar rechazos asíncronos en entornos restrictivos.
+
+[0.4.0] — 2026-09-25
+
+CORRECCIONES CRÍTICAS:
+- Noise reduction ahora se habilita correctamente: se envía set-enabled:true antes de calibrate en cada adquisición de stream. Anteriormente el procesador nunca se activaba porque enabled permanecía en false.
+- ipcMain.once reemplazado por ipcMain.on con limpieza manual en showEnvironmentSelector. El uso de .once impedía reabrir el selector tras la primera selección (ej. macOS activate), dejando la app sin respuesta.
+- before-quit cleanup ahora verifica mainWindow.isDestroyed() antes de ejecutar executeJavaScript, previniendo crashes durante shutdown si el renderer ya fue destruido.
+
+MEJORAS:
+- Eliminada propiedad "icon": null de win config en package.json para evitar warnings de electron-builder.
+- Removido comentario obsoleto sobre ipcMain.once que ya no aplicaba tras el refactor del selector.
+
+[0.3.0] — 2026-09-25
+
+SEGURIDAD:
+- Permisos de sesión (media, clipboard, fullscreen) ahora restringidos a orígenes confiables únicamente; se deniegan automáticamente para URLs no autorizadas.
+- Bloqueo de navegación top-level hacia orígenes no confiables mediante will-navigate; enlaces externos se abren en el navegador del sistema.
+- Inyección de script de reducción de ruido solo se ejecuta en orígenes verificados, previniendo inyección en páginas inesperadas.
+- CSP reforzado en selector.html: añadidas directivas base-uri 'none', form-action 'none' y frame-ancestors 'none'.
+- Validación de mensajes IPC en noise-reduction-processor.js para prevenir crashes por datos malformados.
+
+CORRECCIONES:
+- set-noise-reduction ahora coerciona explícitamente a booleano (!!enabled) para evitar estados inconsistentes.
+- Validación numérica con Number.isFinite() en set-strength descarta NaN e Infinity antes de aplicar clamp.
+
+MEJORAS:
+- trustedOrigins calculado una sola vez desde ENVIRONMENTS y reutilizado en permission handler, will-navigate y did-finish-load.
+- allowedPermissions convertido a Set para búsqueda O(1) en lugar de Array.includes().
+
+[0.2.0] — 2026-09-25
+
+SEGURIDAD:
+- Validación de URLs de entorno al inicio para prevenir open-redirect por manipulación de config.
+- Hardening del handler de enlaces externos: bloqueo de protocolos no-http (javascript:, data:, file:) para prevenir ataques de protocol handler.
+- Whitelist de archivos en protocolo anr:// para prevenir path traversal; verificación de ruta resuelta como defensa en profundidad.
+- CSP ya configurado correctamente en selector.html (default-src 'none').
+
+CORRECCIONES:
+- Fix de fuga de recursos en noise injection script: AudioContext, WorkletNode y MediaStreamSource ahora se limpian correctamente antes de crear nuevos grafos de audio.
+- Fix de cleanup en before-quit: ahora usa función expuesta window.__anotherCleanupAudio en lugar de referenciar variables IIFE-scoped inaccesibles.
+- El módulo AudioWorklet se carga una sola vez por contexto (moduleLoaded flag) para evitar registros duplicados.
+
+RENDIMIENTO:
+- AudioContext se cierra y recrea en cada adquisición de stream para liberar recursos DSP acumulados.
+- Limpieza explícita de nodos desconectados previene memory growth en sesiones largas.
+
+[0.1.0] — 2026-09
+
+AÑADIDO:
+- Cliente privado basado en Node.js.
+- Estructura de proyecto con package.json y src/.
+- Dependencias gestionadas vía npm.
+
+NOTAS:
+- Proyecto en fase inicial de desarrollo.
+- Sin funcionalidades documentadas adicionales aún.
