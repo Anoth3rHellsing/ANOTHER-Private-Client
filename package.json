@@ -6,7 +6,8 @@
   "scripts": {
     "start": "electron .",
     "dev": "electron . --dev",
-    "build": "electron-builder --win dir"
+    "build": "electron-builder --win dir",
+    "build:linux": "electron-builder --linux"
   },
   "build": {
     "appId": "com.another.private-client",
@@ -20,6 +21,9 @@
     ],
     "win": {
       "target": "dir"
+    },
+    "linux": {
+      "target": "AppImage"
     }
   },
   "devDependencies": {
