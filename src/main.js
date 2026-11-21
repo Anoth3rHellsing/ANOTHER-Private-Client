@@ -12,7 +12,8 @@ app.commandLine.appendSwitch('js-flags', '--max-old-space-size=512'); // 256MB t
 
 // Register custom protocol to serve AudioWorklet files (file:// is blocked in worklets)
 protocol.registerSchemesAsPrivileged([
-  { scheme: 'anr', privileges: { standard: true, secure: true, supportFetchAPI: true } }
+  // corsEnabled: la web (https) carga el worklet en modo CORS; sin esto Chromium lo bloquea.
+  { scheme: 'anr', privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true } }
 ]);
 
 let mainWindow = null;
@@ -334,8 +335,14 @@ app.whenReady().then(() => {
   // Register custom protocol handler for AudioWorklet files (async read)
   // Security: whitelist only known processor files to prevent path traversal
   const ALLOWED_ANR_FILES = new Set(['noise-reduction-processor.js']);
-  protocol.handle('anr', async (request) => {
-    const requestedFile = request.url.replace('anr://', '').split('?')[0].split('#')[0];
+  const anrHandler = async (request) => {
+    // Al ser un esquema «standard», anr://noise-reduction-processor.js llega como
+    // anr://noise-reduction-processor.js/ : el nombre del archivo es el host.
+    let requestedFile = '';
+    try {
+      const u = new URL(request.url);
+      requestedFile = u.pathname === '/' || u.pathname === '' ? u.hostname : u.hostname + u.pathname;
+    } catch { /* URL inválida: se rechaza abajo */ }
     if (!ALLOWED_ANR_FILES.has(requestedFile)) {
       return new Response('Forbidden', { status: 403 });
     }
@@ -350,13 +357,20 @@ app.whenReady().then(() => {
       return new Response(data, {
         headers: {
           'Content-Type': 'application/javascript',
-          'Cache-Control': 'no-store'
+          'Cache-Control': 'no-store',
+          // Archivo estático y público de la app; la web lo pide desde su propio origen.
+          'Access-Control-Allow-Origin': '*'
         }
       });
     } catch {
       return new Response('', { status: 404 });
     }
-  });
+  };
+  // protocol.handle solo cubre la sesión por defecto; la app vive en la partición
+  // persist:another-private, así que sin este segundo registro el worklet nunca cargaba
+  // y la reducción de ruido devolvía siempre el audio sin procesar.
+  protocol.handle('anr', anrHandler);
+  session.fromPartition('persist:another-private').protocol.handle('anr', anrHandler);
 
   // Show selector immediately — don't block startup on cleanup
   showEnvironmentSelector();
