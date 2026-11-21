@@ -52,89 +52,89 @@ ipcMain.handle('set-noise-reduction', (_event, enabled) => {
 // and apply the AudioWorklet noise reduction processor
 const NOISE_INJECTION_SCRIPT = `
 (function() {
+  if (navigator.mediaDevices.__anrWrapped) return;
   const originalGetUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
-  let noiseWorkletNode = null;
-  let audioContext = null;
-  let currentSource = null;
-  let moduleLoaded = false;
+  // Un grafo de audio por cada captura: así una captura nueva no deja muda a la anterior
+  // y parar las pistas procesadas también apaga el micrófono real.
+  const graphs = new Set();
 
   async function getNoiseState() {
     try { return await window.anotherAPI.getNoiseReductionState(); } catch { return false; }
   }
 
-  // Cleanup previous audio graph to prevent resource leaks
-  function cleanupAudioGraph() {
-    try { if (currentSource) { currentSource.disconnect(); currentSource = null; } } catch {}
-    try { if (noiseWorkletNode) { noiseWorkletNode.disconnect(); noiseWorkletNode = null; } } catch {}
-    // Close and recreate context to free DSP resources (AudioContext reuse causes memory growth)
+  async function buildGraph(stream) {
+    const rawAudio = stream.getAudioTracks();
+    let ctx;
     try {
-      if (audioContext && audioContext.state !== 'closed') {
-        audioContext.close().catch(() => {});
-        audioContext = null;
-        moduleLoaded = false;
+      ctx = new AudioContext({ sampleRate: 48000 });
+    } catch (ctxErr) {
+      console.warn('[A.N.O.T.H.E.R.] AudioContext creation failed:', ctxErr);
+      return stream;
+    }
+    const graph = { closed: false, rawAudio, processed: [] };
+    graph.close = () => {
+      if (graph.closed) return;
+      graph.closed = true;
+      graphs.delete(graph);
+      try { ctx.close().catch(() => {}); } catch {}
+    };
+    // Parar todo: pistas procesadas, micrófono real y contexto.
+    graph.stopAll = () => {
+      graph.processed.forEach(t => { try { t.__anrStop(); } catch {} });
+      rawAudio.forEach(t => { try { t.stop(); } catch {} });
+      graph.close();
+    };
+    graphs.add(graph);
+    try {
+      if (ctx.state === 'suspended') {
+        try { await ctx.resume(); } catch {}
       }
-    } catch {}
+      await ctx.audioWorklet.addModule('anr://noise-reduction-processor.js');
+      const source = ctx.createMediaStreamSource(new MediaStream(rawAudio));
+      const node = new AudioWorkletNode(ctx, 'noise-reduction-processor', {
+        processorOptions: { sampleRate: ctx.sampleRate, bufferSize: 128 }
+      });
+      // Enable processor and calibrate noise profile on each new stream acquisition
+      node.port.postMessage({ type: 'set-enabled', value: true });
+      node.port.postMessage({ type: 'calibrate' });
+      const destination = ctx.createMediaStreamDestination();
+      source.connect(node).connect(destination);
+
+      graph.processed = destination.stream.getAudioTracks();
+      let live = graph.processed.length;
+      for (const t of graph.processed) {
+        const nativeStop = t.stop.bind(t);
+        t.__anrStop = nativeStop;
+        // Cuando la web para la última pista procesada, se apaga el micro real y el grafo.
+        t.stop = function() {
+          if (t.readyState !== 'ended') { nativeStop(); live--; }
+          if (live <= 0) graph.stopAll();
+        };
+      }
+      // Si el micro real se acaba (desconectado), la pista procesada también.
+      rawAudio.forEach(r => r.addEventListener('ended', () => {
+        if (rawAudio.every(x => x.readyState === 'ended')) graph.stopAll();
+      }));
+
+      return new MediaStream([...graph.processed, ...stream.getVideoTracks()]);
+    } catch (e) {
+      console.warn('[A.N.O.T.H.E.R.] Noise reduction unavailable, using raw stream:', e);
+      graph.close();
+      return stream;
+    }
   }
 
   navigator.mediaDevices.getUserMedia = async function(constraints) {
     const stream = await originalGetUserMedia(constraints);
-
     // Only process audio streams when noise reduction is enabled
-    if (!constraints.audio || !await getNoiseState()) return stream;
-
-    try {
-      // Always clean up previous graph before creating new one
-      cleanupAudioGraph();
-
-      // Create context with explicit sample rate; handle environments where
-      // AudioContext constructor throws (e.g. no audio device, policy block)
-      try {
-        audioContext = new AudioContext({ sampleRate: 48000 });
-      } catch (ctxErr) {
-        console.warn('[A.N.O.T.H.E.R.] AudioContext creation failed:', ctxErr);
-        return stream;
-      }
-      if (audioContext.state === 'suspended') {
-        try { await audioContext.resume(); } catch {}
-      }
-
-      currentSource = audioContext.createMediaStreamSource(stream);
-      if (!moduleLoaded) {
-        try {
-          await audioContext.audioWorklet.addModule('anr://noise-reduction-processor.js');
-          moduleLoaded = true;
-        } catch (modErr) {
-          console.warn('[A.N.O.T.H.E.R.] Worklet module load failed, resetting:', modErr);
-          moduleLoaded = false;
-          cleanupAudioGraph();
-          return stream;
-        }
-      }
-      noiseWorkletNode = new AudioWorkletNode(audioContext, 'noise-reduction-processor', {
-        processorOptions: { sampleRate: audioContext.sampleRate, bufferSize: 128 }
-      });
-
-      // Enable processor and calibrate noise profile on each new stream acquisition
-      noiseWorkletNode.port.postMessage({ type: 'set-enabled', value: true });
-      noiseWorkletNode.port.postMessage({ type: 'calibrate' });
-
-      const destination = audioContext.createMediaStreamDestination();
-      currentSource.connect(noiseWorkletNode).connect(destination);
-
-      // Return processed stream with video tracks from original
-      const processedStream = destination.stream;
-      stream.getVideoTracks().forEach(t => processedStream.addTrack(t));
-
-      return processedStream;
-    } catch (e) {
-      console.warn('[A.N.O.T.H.E.R.] Noise reduction unavailable, using raw stream:', e);
-      cleanupAudioGraph();
-      return stream;
-    }
+    if (!constraints || !constraints.audio || stream.getAudioTracks().length === 0) return stream;
+    if (!await getNoiseState()) return stream;
+    return buildGraph(stream);
   };
+  navigator.mediaDevices.__anrWrapped = true;
 
   // Expose cleanup for graceful shutdown
-  window.__anotherCleanupAudio = cleanupAudioGraph;
+  window.__anotherCleanupAudio = () => { [...graphs].forEach(g => g.stopAll()); };
 })();
 `;
 
