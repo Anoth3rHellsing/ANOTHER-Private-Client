@@ -6,7 +6,6 @@ const fs = require('fs');
 app.commandLine.appendSwitch('disable-background-timer-throttling');
 app.commandLine.appendSwitch('disable-renderer-backgrounding');
 app.commandLine.appendSwitch('disable-features', 'TranslateUI,VizDisplayCompositor,HardwareMediaKeyHandling,MediaSessionService');
-app.commandLine.appendSwitch('disable-gpu-sandbox'); // Reduces GPU overhead for webview-only apps
 app.commandLine.appendSwitch('renderer-process-limit', '4'); // Allow enough renderers for selector + main + popups
 app.commandLine.appendSwitch('js-flags', '--max-old-space-size=512'); // 256MB too low for AudioWorklet + WebView
 
