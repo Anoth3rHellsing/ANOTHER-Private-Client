@@ -137,9 +137,13 @@ const NOISE_INJECTION_SCRIPT = `
 })();
 `;
 
+// El entorno de desarrollo (una URL efímera de Replit) solo existe sin empaquetar o con
+// --dev. En una build instalada no se ofrece, no es el valor por defecto y su origen no
+// recibe permisos de micrófono, pantalla ni portapapeles.
+const DEV_ENABLED = !app.isPackaged || process.argv.includes('--dev');
 const ENVIRONMENTS = {
-  dev: 'https://ce21a311-d966-4f44-8ddd-2ba432555a74-00-3g8n538es1obp.picard.replit.dev/app',
-  prod: 'https://another-private.replit.app/app'
+  prod: 'https://another-private.replit.app/app',
+  ...(DEV_ENABLED ? { dev: 'https://ce21a311-d966-4f44-8ddd-2ba432555a74-00-3g8n538es1obp.picard.replit.dev/app' } : {})
 };
 
 // Validate environment URLs at startup to prevent open-redirect via config tampering
@@ -318,10 +322,11 @@ function showEnvironmentSelector() {
   // ipcMain.once would break re-opening the selector after the first selection (e.g. macOS activate).
   const onSelectEnv = (_event, env) => {
     selector.close();
-    if (!ENVIRONMENTS.hasOwnProperty(env)) {
-      console.warn(`[SECURITY] Unknown environment "${env}" requested, falling back to dev`);
+    const known = typeof env === 'string' && Object.prototype.hasOwnProperty.call(ENVIRONMENTS, env);
+    if (!known) {
+      console.warn(`[SECURITY] Unknown or unavailable environment "${env}" requested, falling back to prod`);
     }
-    const url = ENVIRONMENTS[env] || ENVIRONMENTS.dev;
+    const url = known ? ENVIRONMENTS[env] : ENVIRONMENTS.prod;
     createWindow(url);
   };
   ipcMain.on('select-environment', onSelectEnv);
