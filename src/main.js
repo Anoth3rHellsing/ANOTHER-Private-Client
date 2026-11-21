@@ -1,4 +1,4 @@
-const { app, BrowserWindow, shell, session, ipcMain, protocol } = require('electron');
+const { app, BrowserWindow, shell, session, ipcMain, protocol, desktopCapturer } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
@@ -207,17 +207,25 @@ function createWindow(targetUrl) {
     }
   });
 
-  // Enable getDisplayMedia (screen sharing) — Electron requires an explicit
-  // handler that resolves to a DesktopCapturerSource from desktopCapturer.
-  const { desktopCapturer } = require('electron');
+  // getDisplayMedia (compartir pantalla): el usuario elige pantalla o ventana en un
+  // selector propio. Nada se comparte sin elegirlo. El audio del sistema ('loopback')
+  // solo existe en Windows; en el resto se comparte solo el vídeo.
+  const ownerWindow = mainWindow;
   mainWindow.webContents.session.setDisplayMediaRequestHandler((request, callback) => {
-    if (!request.videoRequested) return callback({});
-    desktopCapturer.getSources({ types: ['screen', 'window'] }).then((sources) => {
-      if (!sources || sources.length === 0) return callback({});
-      // Prefer the first full-screen source; fall back to any available source.
-      const selected = sources.find(s => s.id.startsWith('screen:')) || sources[0];
-      callback({ video: selected });
-    }).catch(() => callback({}));
+    // Para rechazar hay que pasar null: callback({}) lanza «Video was requested, but no
+    // video stream was provided». El callback solo se puede llamar una vez.
+    let answered = false;
+    const answer = (streams) => {
+      if (answered) return;
+      answered = true;
+      try { callback(streams); } catch (e) { console.warn('[A.N.O.T.H.E.R.] Display media callback failed:', e.message); }
+    };
+    if (!request.videoRequested) return answer(null);
+    pickDisplaySource(ownerWindow).then((source) => {
+      if (!source) return answer(null);
+      const withAudio = request.audioRequested && process.platform === 'win32';
+      answer(withAudio ? { video: source, audio: 'loopback' } : { video: source });
+    }).catch(() => answer(null));
   });
 
   // Open external links in default browser (privacy + requirement #2)
@@ -290,6 +298,78 @@ function createWindow(targetUrl) {
 
   mainWindow.on('closed', () => {
     mainWindow = null;
+  });
+}
+
+// Selector de pantalla: ventana modal con las pantallas y ventanas y sus miniaturas.
+// Resuelve con la DesktopCapturerSource elegida, o null si se cancela o se cierra.
+let displayPickerOpen = false;
+async function pickDisplaySource(parent) {
+  if (displayPickerOpen) return null; // una petición a la vez
+  displayPickerOpen = true;
+  let sources;
+  try {
+    sources = await desktopCapturer.getSources({
+      types: ['screen', 'window'],
+      thumbnailSize: { width: 320, height: 180 },
+      fetchWindowIcons: false
+    });
+  } catch (e) {
+    displayPickerOpen = false;
+    throw e;
+  }
+  if (!sources || sources.length === 0) { displayPickerOpen = false; return null; }
+
+  return new Promise((resolve) => {
+    const usableParent = parent && !parent.isDestroyed() ? parent : undefined;
+    const picker = new BrowserWindow({
+      parent: usableParent,
+      modal: !!usableParent,
+      width: 760,
+      height: 540,
+      minWidth: 480,
+      minHeight: 360,
+      minimizable: false,
+      maximizable: false,
+      autoHideMenuBar: true,
+      backgroundColor: '#0a1929',
+      title: 'Compartir pantalla',
+      show: false,
+      webPreferences: {
+        preload: path.join(__dirname, 'picker-preload.js'),
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+        spellcheck: false
+      }
+    });
+    let finished = false;
+    const finish = (source) => {
+      if (finished) return;
+      finished = true;
+      displayPickerOpen = false;
+      ipcMain.removeListener('display-picker:choose', onChoose);
+      if (!picker.isDestroyed()) picker.close();
+      resolve(source);
+    };
+    const onChoose = (event, id) => {
+      if (picker.isDestroyed() || event.sender !== picker.webContents) return;
+      finish(id ? (sources.find(s => s.id === id) || null) : null);
+    };
+    ipcMain.on('display-picker:choose', onChoose);
+    picker.on('closed', () => finish(null));
+    picker.webContents.on('will-navigate', (e) => e.preventDefault());
+    picker.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+    picker.webContents.once('did-finish-load', () => {
+      picker.webContents.send('display-picker:sources', sources.map(s => ({
+        id: s.id,
+        name: s.name,
+        kind: s.id.startsWith('screen:') ? 'screen' : 'window',
+        thumbnail: s.thumbnail && !s.thumbnail.isEmpty() ? s.thumbnail.toDataURL() : ''
+      })));
+      picker.show();
+    });
+    picker.loadFile(path.join(__dirname, 'picker.html'));
   });
 }
 
