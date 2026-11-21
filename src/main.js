@@ -1,4 +1,4 @@
-const { app, BrowserWindow, shell, session, ipcMain, protocol } = require('electron');
+const { app, BrowserWindow, shell, session, ipcMain, protocol, desktopCapturer } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
@@ -6,13 +6,13 @@ const fs = require('fs');
 app.commandLine.appendSwitch('disable-background-timer-throttling');
 app.commandLine.appendSwitch('disable-renderer-backgrounding');
 app.commandLine.appendSwitch('disable-features', 'TranslateUI,VizDisplayCompositor,HardwareMediaKeyHandling,MediaSessionService');
-app.commandLine.appendSwitch('disable-gpu-sandbox'); // Reduces GPU overhead for webview-only apps
 app.commandLine.appendSwitch('renderer-process-limit', '4'); // Allow enough renderers for selector + main + popups
 app.commandLine.appendSwitch('js-flags', '--max-old-space-size=512'); // 256MB too low for AudioWorklet + WebView
 
 // Register custom protocol to serve AudioWorklet files (file:// is blocked in worklets)
 protocol.registerSchemesAsPrivileged([
-  { scheme: 'anr', privileges: { standard: true, secure: true, supportFetchAPI: true } }
+  // corsEnabled: la web (https) carga el worklet en modo CORS; sin esto Chromium lo bloquea.
+  { scheme: 'anr', privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true } }
 ]);
 
 let mainWindow = null;
@@ -51,95 +51,99 @@ ipcMain.handle('set-noise-reduction', (_event, enabled) => {
 // and apply the AudioWorklet noise reduction processor
 const NOISE_INJECTION_SCRIPT = `
 (function() {
+  if (navigator.mediaDevices.__anrWrapped) return;
   const originalGetUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
-  let noiseWorkletNode = null;
-  let audioContext = null;
-  let currentSource = null;
-  let moduleLoaded = false;
+  // Un grafo de audio por cada captura: así una captura nueva no deja muda a la anterior
+  // y parar las pistas procesadas también apaga el micrófono real.
+  const graphs = new Set();
 
   async function getNoiseState() {
     try { return await window.anotherAPI.getNoiseReductionState(); } catch { return false; }
   }
 
-  // Cleanup previous audio graph to prevent resource leaks
-  function cleanupAudioGraph() {
-    try { if (currentSource) { currentSource.disconnect(); currentSource = null; } } catch {}
-    try { if (noiseWorkletNode) { noiseWorkletNode.disconnect(); noiseWorkletNode = null; } } catch {}
-    // Close and recreate context to free DSP resources (AudioContext reuse causes memory growth)
+  async function buildGraph(stream) {
+    const rawAudio = stream.getAudioTracks();
+    let ctx;
     try {
-      if (audioContext && audioContext.state !== 'closed') {
-        audioContext.close().catch(() => {});
-        audioContext = null;
-        moduleLoaded = false;
+      ctx = new AudioContext({ sampleRate: 48000 });
+    } catch (ctxErr) {
+      console.warn('[A.N.O.T.H.E.R.] AudioContext creation failed:', ctxErr);
+      return stream;
+    }
+    const graph = { closed: false, rawAudio, processed: [] };
+    graph.close = () => {
+      if (graph.closed) return;
+      graph.closed = true;
+      graphs.delete(graph);
+      try { ctx.close().catch(() => {}); } catch {}
+    };
+    // Parar todo: pistas procesadas, micrófono real y contexto.
+    graph.stopAll = () => {
+      graph.processed.forEach(t => { try { t.__anrStop(); } catch {} });
+      rawAudio.forEach(t => { try { t.stop(); } catch {} });
+      graph.close();
+    };
+    graphs.add(graph);
+    try {
+      if (ctx.state === 'suspended') {
+        try { await ctx.resume(); } catch {}
       }
-    } catch {}
+      await ctx.audioWorklet.addModule('anr://noise-reduction-processor.js');
+      const source = ctx.createMediaStreamSource(new MediaStream(rawAudio));
+      const node = new AudioWorkletNode(ctx, 'noise-reduction-processor', {
+        processorOptions: { sampleRate: ctx.sampleRate, bufferSize: 128 }
+      });
+      // Enable processor and calibrate noise profile on each new stream acquisition
+      node.port.postMessage({ type: 'set-enabled', value: true });
+      node.port.postMessage({ type: 'calibrate' });
+      const destination = ctx.createMediaStreamDestination();
+      source.connect(node).connect(destination);
+
+      graph.processed = destination.stream.getAudioTracks();
+      let live = graph.processed.length;
+      for (const t of graph.processed) {
+        const nativeStop = t.stop.bind(t);
+        t.__anrStop = nativeStop;
+        // Cuando la web para la última pista procesada, se apaga el micro real y el grafo.
+        t.stop = function() {
+          if (t.readyState !== 'ended') { nativeStop(); live--; }
+          if (live <= 0) graph.stopAll();
+        };
+      }
+      // Si el micro real se acaba (desconectado), la pista procesada también.
+      rawAudio.forEach(r => r.addEventListener('ended', () => {
+        if (rawAudio.every(x => x.readyState === 'ended')) graph.stopAll();
+      }));
+
+      return new MediaStream([...graph.processed, ...stream.getVideoTracks()]);
+    } catch (e) {
+      console.warn('[A.N.O.T.H.E.R.] Noise reduction unavailable, using raw stream:', e);
+      graph.close();
+      return stream;
+    }
   }
 
   navigator.mediaDevices.getUserMedia = async function(constraints) {
     const stream = await originalGetUserMedia(constraints);
-
     // Only process audio streams when noise reduction is enabled
-    if (!constraints.audio || !await getNoiseState()) return stream;
-
-    try {
-      // Always clean up previous graph before creating new one
-      cleanupAudioGraph();
-
-      // Create context with explicit sample rate; handle environments where
-      // AudioContext constructor throws (e.g. no audio device, policy block)
-      try {
-        audioContext = new AudioContext({ sampleRate: 48000 });
-      } catch (ctxErr) {
-        console.warn('[A.N.O.T.H.E.R.] AudioContext creation failed:', ctxErr);
-        return stream;
-      }
-      if (audioContext.state === 'suspended') {
-        try { await audioContext.resume(); } catch {}
-      }
-
-      currentSource = audioContext.createMediaStreamSource(stream);
-      if (!moduleLoaded) {
-        try {
-          await audioContext.audioWorklet.addModule('anr://noise-reduction-processor.js');
-          moduleLoaded = true;
-        } catch (modErr) {
-          console.warn('[A.N.O.T.H.E.R.] Worklet module load failed, resetting:', modErr);
-          moduleLoaded = false;
-          cleanupAudioGraph();
-          return stream;
-        }
-      }
-      noiseWorkletNode = new AudioWorkletNode(audioContext, 'noise-reduction-processor', {
-        processorOptions: { sampleRate: audioContext.sampleRate, bufferSize: 128 }
-      });
-
-      // Enable processor and calibrate noise profile on each new stream acquisition
-      noiseWorkletNode.port.postMessage({ type: 'set-enabled', value: true });
-      noiseWorkletNode.port.postMessage({ type: 'calibrate' });
-
-      const destination = audioContext.createMediaStreamDestination();
-      currentSource.connect(noiseWorkletNode).connect(destination);
-
-      // Return processed stream with video tracks from original
-      const processedStream = destination.stream;
-      stream.getVideoTracks().forEach(t => processedStream.addTrack(t));
-
-      return processedStream;
-    } catch (e) {
-      console.warn('[A.N.O.T.H.E.R.] Noise reduction unavailable, using raw stream:', e);
-      cleanupAudioGraph();
-      return stream;
-    }
+    if (!constraints || !constraints.audio || stream.getAudioTracks().length === 0) return stream;
+    if (!await getNoiseState()) return stream;
+    return buildGraph(stream);
   };
+  navigator.mediaDevices.__anrWrapped = true;
 
   // Expose cleanup for graceful shutdown
-  window.__anotherCleanupAudio = cleanupAudioGraph;
+  window.__anotherCleanupAudio = () => { [...graphs].forEach(g => g.stopAll()); };
 })();
 `;
 
+// El entorno de desarrollo (una URL efímera de Replit) solo existe sin empaquetar o con
+// --dev. En una build instalada no se ofrece, no es el valor por defecto y su origen no
+// recibe permisos de micrófono, pantalla ni portapapeles.
+const DEV_ENABLED = !app.isPackaged || process.argv.includes('--dev');
 const ENVIRONMENTS = {
-  dev: 'https://ce21a311-d966-4f44-8ddd-2ba432555a74-00-3g8n538es1obp.picard.replit.dev/app',
-  prod: 'https://another-private.replit.app/app'
+  prod: 'https://another-private.replit.app/app',
+  ...(DEV_ENABLED ? { dev: 'https://ce21a311-d966-4f44-8ddd-2ba432555a74-00-3g8n538es1obp.picard.replit.dev/app' } : {})
 };
 
 // Validate environment URLs at startup to prevent open-redirect via config tampering
@@ -203,17 +207,25 @@ function createWindow(targetUrl) {
     }
   });
 
-  // Enable getDisplayMedia (screen sharing) — Electron requires an explicit
-  // handler that resolves to a DesktopCapturerSource from desktopCapturer.
-  const { desktopCapturer } = require('electron');
+  // getDisplayMedia (compartir pantalla): el usuario elige pantalla o ventana en un
+  // selector propio. Nada se comparte sin elegirlo. El audio del sistema ('loopback')
+  // solo existe en Windows; en el resto se comparte solo el vídeo.
+  const ownerWindow = mainWindow;
   mainWindow.webContents.session.setDisplayMediaRequestHandler((request, callback) => {
-    if (!request.videoRequested) return callback({});
-    desktopCapturer.getSources({ types: ['screen', 'window'] }).then((sources) => {
-      if (!sources || sources.length === 0) return callback({});
-      // Prefer the first full-screen source; fall back to any available source.
-      const selected = sources.find(s => s.id.startsWith('screen:')) || sources[0];
-      callback({ video: selected });
-    }).catch(() => callback({}));
+    // Para rechazar hay que pasar null: callback({}) lanza «Video was requested, but no
+    // video stream was provided». El callback solo se puede llamar una vez.
+    let answered = false;
+    const answer = (streams) => {
+      if (answered) return;
+      answered = true;
+      try { callback(streams); } catch (e) { console.warn('[A.N.O.T.H.E.R.] Display media callback failed:', e.message); }
+    };
+    if (!request.videoRequested) return answer(null);
+    pickDisplaySource(ownerWindow).then((source) => {
+      if (!source) return answer(null);
+      const withAudio = request.audioRequested && process.platform === 'win32';
+      answer(withAudio ? { video: source, audio: 'loopback' } : { video: source });
+    }).catch(() => answer(null));
   });
 
   // Open external links in default browser (privacy + requirement #2)
@@ -289,6 +301,78 @@ function createWindow(targetUrl) {
   });
 }
 
+// Selector de pantalla: ventana modal con las pantallas y ventanas y sus miniaturas.
+// Resuelve con la DesktopCapturerSource elegida, o null si se cancela o se cierra.
+let displayPickerOpen = false;
+async function pickDisplaySource(parent) {
+  if (displayPickerOpen) return null; // una petición a la vez
+  displayPickerOpen = true;
+  let sources;
+  try {
+    sources = await desktopCapturer.getSources({
+      types: ['screen', 'window'],
+      thumbnailSize: { width: 320, height: 180 },
+      fetchWindowIcons: false
+    });
+  } catch (e) {
+    displayPickerOpen = false;
+    throw e;
+  }
+  if (!sources || sources.length === 0) { displayPickerOpen = false; return null; }
+
+  return new Promise((resolve) => {
+    const usableParent = parent && !parent.isDestroyed() ? parent : undefined;
+    const picker = new BrowserWindow({
+      parent: usableParent,
+      modal: !!usableParent,
+      width: 760,
+      height: 540,
+      minWidth: 480,
+      minHeight: 360,
+      minimizable: false,
+      maximizable: false,
+      autoHideMenuBar: true,
+      backgroundColor: '#0a1929',
+      title: 'Compartir pantalla',
+      show: false,
+      webPreferences: {
+        preload: path.join(__dirname, 'picker-preload.js'),
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+        spellcheck: false
+      }
+    });
+    let finished = false;
+    const finish = (source) => {
+      if (finished) return;
+      finished = true;
+      displayPickerOpen = false;
+      ipcMain.removeListener('display-picker:choose', onChoose);
+      if (!picker.isDestroyed()) picker.close();
+      resolve(source);
+    };
+    const onChoose = (event, id) => {
+      if (picker.isDestroyed() || event.sender !== picker.webContents) return;
+      finish(id ? (sources.find(s => s.id === id) || null) : null);
+    };
+    ipcMain.on('display-picker:choose', onChoose);
+    picker.on('closed', () => finish(null));
+    picker.webContents.on('will-navigate', (e) => e.preventDefault());
+    picker.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+    picker.webContents.once('did-finish-load', () => {
+      picker.webContents.send('display-picker:sources', sources.map(s => ({
+        id: s.id,
+        name: s.name,
+        kind: s.id.startsWith('screen:') ? 'screen' : 'window',
+        thumbnail: s.thumbnail && !s.thumbnail.isEmpty() ? s.thumbnail.toDataURL() : ''
+      })));
+      picker.show();
+    });
+    picker.loadFile(path.join(__dirname, 'picker.html'));
+  });
+}
+
 function showEnvironmentSelector() {
   const selector = new BrowserWindow({
     width: 700,
@@ -318,10 +402,11 @@ function showEnvironmentSelector() {
   // ipcMain.once would break re-opening the selector after the first selection (e.g. macOS activate).
   const onSelectEnv = (_event, env) => {
     selector.close();
-    if (!ENVIRONMENTS.hasOwnProperty(env)) {
-      console.warn(`[SECURITY] Unknown environment "${env}" requested, falling back to dev`);
+    const known = typeof env === 'string' && Object.prototype.hasOwnProperty.call(ENVIRONMENTS, env);
+    if (!known) {
+      console.warn(`[SECURITY] Unknown or unavailable environment "${env}" requested, falling back to prod`);
     }
-    const url = ENVIRONMENTS[env] || ENVIRONMENTS.dev;
+    const url = known ? ENVIRONMENTS[env] : ENVIRONMENTS.prod;
     createWindow(url);
   };
   ipcMain.on('select-environment', onSelectEnv);
@@ -334,8 +419,14 @@ app.whenReady().then(() => {
   // Register custom protocol handler for AudioWorklet files (async read)
   // Security: whitelist only known processor files to prevent path traversal
   const ALLOWED_ANR_FILES = new Set(['noise-reduction-processor.js']);
-  protocol.handle('anr', async (request) => {
-    const requestedFile = request.url.replace('anr://', '').split('?')[0].split('#')[0];
+  const anrHandler = async (request) => {
+    // Al ser un esquema «standard», anr://noise-reduction-processor.js llega como
+    // anr://noise-reduction-processor.js/ : el nombre del archivo es el host.
+    let requestedFile = '';
+    try {
+      const u = new URL(request.url);
+      requestedFile = u.pathname === '/' || u.pathname === '' ? u.hostname : u.hostname + u.pathname;
+    } catch { /* URL inválida: se rechaza abajo */ }
     if (!ALLOWED_ANR_FILES.has(requestedFile)) {
       return new Response('Forbidden', { status: 403 });
     }
@@ -350,13 +441,20 @@ app.whenReady().then(() => {
       return new Response(data, {
         headers: {
           'Content-Type': 'application/javascript',
-          'Cache-Control': 'no-store'
+          'Cache-Control': 'no-store',
+          // Archivo estático y público de la app; la web lo pide desde su propio origen.
+          'Access-Control-Allow-Origin': '*'
         }
       });
     } catch {
       return new Response('', { status: 404 });
     }
-  });
+  };
+  // protocol.handle solo cubre la sesión por defecto; la app vive en la partición
+  // persist:another-private, así que sin este segundo registro el worklet nunca cargaba
+  // y la reducción de ruido devolvía siempre el audio sin procesar.
+  protocol.handle('anr', anrHandler);
+  session.fromPartition('persist:another-private').protocol.handle('anr', anrHandler);
 
   // Show selector immediately — don't block startup on cleanup
   showEnvironmentSelector();
